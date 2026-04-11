@@ -29,26 +29,6 @@ export function MessageBubble({ message }: Props) {
 
   return (
     <div style={{ marginBottom: 20 }}>
-      {/* Attribution badge */}
-      {message.skill && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-          <span style={{
-            background: '#1a1a2e',
-            border: '1px solid #7c3aed',
-            borderRadius: 20,
-            padding: '2px 10px',
-            fontSize: 11,
-            color: '#a78bfa',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 5,
-          }}>
-            {message.skill.icon} via {message.skill.name}
-          </span>
-          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{message.skill.category}</span>
-        </div>
-      )}
-
       {/* Message body */}
       <div style={{
         color: 'var(--text-primary)',
@@ -131,7 +111,9 @@ export function MessageBubble({ message }: Props) {
       </div>
 
       {/* Trace panel */}
-      {message.trace && <TracePanel trace={message.trace} />}
+      {(message.trace || (message.skills && message.skills.length > 0)) && (
+        <TracePanel trace={message.trace} skills={message.skills} />
+      )}
     </div>
   )
 }

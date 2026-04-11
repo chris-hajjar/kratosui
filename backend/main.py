@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from agent import get_agent, reset_agent, stream_chat, refresh_server_info, get_server_health, get_server_tools
-from skills_loader import delete_skill, load_skills, match_skill, save_skill
+from agent import startup_servers, shutdown_servers, reinitialize, reset_agent, stream_chat, refresh_server_info, get_server_health, get_server_tools
+from skills_loader import delete_skill, get_skills_by_name, load_skills, match_skills, save_skill
 from usage_tracker import get_logs, get_stats, get_tool_stats, init_db
 
 BASE_DIR = Path(__file__).parent
@@ -26,10 +26,10 @@ MCP_CONFIG_PATH = BASE_DIR / "mcp_config.json"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    agent = get_agent()
-    async with agent.run_mcp_servers():
-        await refresh_server_info()
-        yield
+    await startup_servers()
+    await refresh_server_info()
+    yield
+    await shutdown_servers()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -55,6 +55,8 @@ class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
     model: str = "openai:gpt-4o"
+    session_id: str = ""
+    persisted_skills: list[str] = []
 
 
 class SkillPayload(BaseModel):
@@ -65,6 +67,7 @@ class SkillPayload(BaseModel):
     status: str = "active"
     triggers: list[str] = []
     body: str = ""
+    persist: bool = False
 
 
 class MCPServerPayload(BaseModel):
@@ -82,31 +85,43 @@ class MCPServerPayload(BaseModel):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    skills = load_skills()
-    active = [s for s in skills if s.status == "active"]
-    matched = match_skill(req.message, active)
+    all_skills = load_skills()
+    active = [s for s in all_skills if s.status == "active"]
+
+    # Newly triggered skills from the current message
+    matched = match_skills(req.message, active)
+    matched_names = {s.name for s in matched}
+
+    # Restore persisted skills from previous turns
+    persisted = get_skills_by_name(req.persisted_skills, all_skills)
+
+    # Merge: persisted first, then newly matched (deduplicated)
+    combined = persisted + [s for s in matched if s.name not in req.persisted_skills]
 
     async def event_stream():
-        if matched:
+        # Emit skill_activated only for newly triggered skills
+        for skill in matched:
             yield {
                 "data": json.dumps({
                     "type": "skill_activated",
-                    "name": matched.name,
-                    "icon": matched.icon,
-                    "category": matched.category,
+                    "name": skill.name,
+                    "icon": skill.icon,
+                    "category": skill.category,
+                    "persist": skill.persist,
                 })
             }
 
         history = [m.model_dump() for m in req.history]
         try:
-            async for event in stream_chat(req.message, history, matched, req.model):
+            async for event in stream_chat(req.message, history, combined, req.model, req.session_id):
                 yield {"data": json.dumps(event)}
         except Exception as exc:
+            source = matched[0].name if matched else (persisted[0].name if persisted else "agent")
             yield {
                 "data": json.dumps({
                     "type": "error",
                     "message": str(exc),
-                    "source": matched.name if matched else "agent",
+                    "source": source,
                 })
             }
 
@@ -130,6 +145,7 @@ def get_skills():
             "triggers": s.triggers,
             "body": s.body,
             "filename": s.filename,
+            "persist": s.persist,
         }
         for s in skills
     ]
@@ -208,21 +224,24 @@ def mcp_tools(name: str):
     return get_server_tools(name)
 
 
-@app.post("/api/mcp")
-def add_mcp(payload: MCPServerPayload):
-    config = json.loads(MCP_CONFIG_PATH.read_text())
+def _build_mcp_entry(payload: MCPServerPayload) -> dict:
     entry: dict = {"type": payload.type}
-    if payload.type == "sse":
+    if payload.type in ("sse", "streamable-http"):
         entry["url"] = payload.url
         if payload.headers:
             entry["headers"] = payload.headers
     else:
         entry["command"] = payload.command
         entry["args"] = payload.args
-    config["mcpServers"][payload.name] = entry
+    return entry
+
+
+@app.post("/api/mcp")
+def add_mcp(payload: MCPServerPayload):
+    config = json.loads(MCP_CONFIG_PATH.read_text())
+    config["mcpServers"][payload.name] = _build_mcp_entry(payload)
     MCP_CONFIG_PATH.write_text(json.dumps(config, indent=2))
-    reset_agent()
-    return {"ok": True, "note": "Restart backend for changes to take effect."}
+    return {"ok": True}
 
 
 @app.put("/api/mcp/{name}")
@@ -230,18 +249,9 @@ def update_mcp(name: str, payload: MCPServerPayload):
     config = json.loads(MCP_CONFIG_PATH.read_text())
     if name not in config["mcpServers"]:
         raise HTTPException(status_code=404, detail="Server not found")
-    entry: dict = {"type": payload.type}
-    if payload.type == "sse":
-        entry["url"] = payload.url
-        if payload.headers:
-            entry["headers"] = payload.headers
-    else:
-        entry["command"] = payload.command
-        entry["args"] = payload.args
-    config["mcpServers"][name] = entry
+    config["mcpServers"][name] = _build_mcp_entry(payload)
     MCP_CONFIG_PATH.write_text(json.dumps(config, indent=2))
-    reset_agent()
-    return {"ok": True, "note": "Restart backend for changes to take effect."}
+    return {"ok": True}
 
 
 @app.delete("/api/mcp/{name}")
@@ -249,8 +259,14 @@ def remove_mcp(name: str):
     config = json.loads(MCP_CONFIG_PATH.read_text())
     config["mcpServers"].pop(name, None)
     MCP_CONFIG_PATH.write_text(json.dumps(config, indent=2))
-    reset_agent()
-    return {"ok": True, "note": "Restart backend for changes to take effect."}
+    return {"ok": True}
+
+
+@app.post("/api/mcp/reinitialize")
+async def reinitialize_mcp():
+    """Reload config, reconnect all servers, rebuild agent — no restart needed."""
+    health = await reinitialize()
+    return {"ok": True, "health": health}
 
 
 # ---------------------------------------------------------------------------

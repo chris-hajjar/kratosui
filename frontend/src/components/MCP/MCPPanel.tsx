@@ -5,7 +5,7 @@ interface Props {
   onClose: () => void
 }
 
-type FormType = 'stdio' | 'sse'
+type FormType = 'stdio' | 'sse' | 'streamable-http'
 
 const EMPTY_FORM = { name: '', filePath: '', url: '', headerKey: '', headerVal: '' }
 
@@ -24,12 +24,11 @@ export function MCPPanel({ onClose }: Props) {
   const [tools, setTools] = useState<Record<string, MCPTool[]>>({})
   const [expanded, setExpanded] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [reinitializing, setReinitializing] = useState(false)
   const [adding, setAdding] = useState(false)
   const [formType, setFormType] = useState<FormType>('stdio')
   const [form, setForm] = useState(EMPTY_FORM)
   const [extraHeaders, setExtraHeaders] = useState<{ k: string; v: string }[]>([])
-  const [note, setNote] = useState('')
-
   const fetchServers = async () => {
     setLoading(true)
     try {
@@ -75,7 +74,8 @@ export function MCPPanel({ onClose }: Props) {
     if (form.headerKey && form.headerVal) headers[form.headerKey] = form.headerVal
     for (const { k, v } of extraHeaders) if (k && v) headers[k] = v
 
-    const { command, args } = formType === 'stdio' ? inferCommand(form.filePath) : { command: '', args: [] }
+    const isRemote = formType === 'sse' || formType === 'streamable-http'
+    const { command, args } = !isRemote ? inferCommand(form.filePath) : { command: '', args: [] }
     const payload = {
       name: form.name.trim(),
       type: formType,
@@ -84,22 +84,42 @@ export function MCPPanel({ onClose }: Props) {
       url: form.url.trim(),
       headers,
     }
-    const res = await fetch('/api/mcp', {
+    await fetch('/api/mcp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    const data = await res.json()
-    setNote(data.note ?? '')
     setForm(EMPTY_FORM)
     setExtraHeaders([])
     setAdding(false)
-    fetchServers()
+    await handleReinitialize()
   }
 
   const handleDelete = async (name: string) => {
     await fetch(`/api/mcp/${name}`, { method: 'DELETE' })
     fetchServers()
+  }
+
+  const handleReinitialize = async () => {
+    setReinitializing(true)
+    try {
+      const res = await fetch('/api/mcp/reinitialize', { method: 'POST' })
+      const data = await res.json()
+      if (data.health) {
+        setHealth(prev => {
+          const next = { ...prev }
+          for (const [name, h] of Object.entries(data.health as Record<string, import('../../types').MCPHealth>)) {
+            next[name] = h
+          }
+          return next
+        })
+        // Refresh tool lists for newly connected servers
+        setTools({})
+      }
+      await fetchServers()
+    } finally {
+      setReinitializing(false)
+    }
   }
 
   const inputStyle: React.CSSProperties = {
@@ -129,23 +149,27 @@ export function MCPPanel({ onClose }: Props) {
             Tool sources available to the AI
           </div>
         </div>
-        <button onClick={onClose} style={{
-          background: 'none', border: 'none', color: 'var(--text-secondary)', fontSize: 20, cursor: 'pointer',
-        }}>×</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            onClick={handleReinitialize}
+            disabled={reinitializing}
+            title="Reconnect all servers"
+            style={{
+              background: 'none', border: '1px solid var(--border)', borderRadius: 6,
+              padding: '4px 10px', color: 'var(--text-secondary)', fontSize: 12,
+              cursor: reinitializing ? 'default' : 'pointer', opacity: reinitializing ? 0.5 : 1,
+            }}
+          >
+            {reinitializing ? '↻ Connecting…' : '↻ Reconnect'}
+          </button>
+          <button onClick={onClose} style={{
+            background: 'none', border: 'none', color: 'var(--text-secondary)', fontSize: 20, cursor: 'pointer',
+          }}>×</button>
+        </div>
       </div>
 
       {/* Body */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
-        {note && (
-          <div style={{
-            background: '#1a1a00', border: '1px solid #3a3a00',
-            borderRadius: 6, padding: '8px 12px', fontSize: 12,
-            color: '#fbbf24', marginBottom: 12,
-          }}>
-            ⚠ {note}
-          </div>
-        )}
-
         {loading ? (
           <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
         ) : (
@@ -179,6 +203,7 @@ export function MCPPanel({ onClose }: Props) {
                       background: !h ? '#555'
                         : h.status === 'ok' ? '#22c55e'
                         : h.status === 'error' ? '#ef4444'
+                        : h.status === 'connecting' ? '#3b82f6'
                         : '#555',
                     }} />
 
@@ -194,14 +219,14 @@ export function MCPPanel({ onClose }: Props) {
                           color: 'var(--text-muted)',
                           letterSpacing: '0.04em',
                         }}>
-                          {s.type === 'sse' ? 'Remote' : 'Local'}
+                          {s.type === 'streamable-http' ? 'HTTP' : s.type === 'sse' ? 'SSE' : 'Local'}
                         </span>
                       </div>
                       <div style={{
                         fontFamily: 'monospace', fontSize: 11, color: 'var(--text-muted)', marginTop: 3,
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                       }}>
-                        {s.type === 'sse' ? s.url : `${s.command} ${(s.args ?? []).join(' ')}`}
+                        {s.type === 'sse' || s.type === 'streamable-http' ? s.url : `${s.command} ${(s.args ?? []).join(' ')}`}
                       </div>
                     </div>
 
@@ -277,7 +302,7 @@ export function MCPPanel({ onClose }: Props) {
 
             {/* Type toggle */}
             <div style={{ display: 'flex', gap: 6 }}>
-              {(['stdio', 'sse'] as FormType[]).map(t => (
+              {([['stdio', 'Local'], ['streamable-http', 'HTTP'], ['sse', 'SSE']] as [FormType, string][]).map(([t, label]) => (
                 <button
                   key={t}
                   onClick={() => setFormType(t)}
@@ -288,7 +313,7 @@ export function MCPPanel({ onClose }: Props) {
                     color: formType === t ? 'var(--btn-text)' : 'var(--text-secondary)',
                   }}
                 >
-                  {t === 'stdio' ? 'Local' : 'Remote (SSE)'}
+                  {label}
                 </button>
               ))}
             </div>
@@ -379,8 +404,7 @@ export function MCPPanel({ onClose }: Props) {
                 disabled={!form.name || (formType === 'stdio' ? !form.filePath : !form.url)}
                 style={{
                   background: (form.name && (formType === 'stdio' ? form.filePath : form.url)) ? '#3b82f6' : 'var(--bg-input)',
-                  border: 'none', borderRadius: 6, padding: '8px 14px',
-                  color: '#fff', fontSize: 13,
+                  border: 'none', borderRadius: 6, padding: '8px 14px', color: '#fff', fontSize: 13,
                   cursor: (form.name && (formType === 'stdio' ? form.filePath : form.url)) ? 'pointer' : 'default',
                 }}
               >

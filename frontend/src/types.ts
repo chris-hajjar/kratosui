@@ -22,7 +22,7 @@ export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  skill?: SkillBadge
+  skills?: SkillBadge[]
   trace?: TraceReceipt
   isStreaming?: boolean
   error?: string
@@ -37,11 +37,12 @@ export interface Skill {
   triggers: string[]
   body: string
   filename: string
+  persist?: boolean
 }
 
 export interface MCPServer {
   name: string
-  type: 'stdio' | 'sse'
+  type: 'stdio' | 'sse' | 'streamable-http'
   command?: string
   args?: string[]
   url?: string
@@ -54,7 +55,7 @@ export interface MCPTool {
 }
 
 export interface MCPHealth {
-  status: 'ok' | 'error' | 'loading'
+  status: 'ok' | 'error' | 'connecting' | 'loading'
   message?: string
 }
 
@@ -62,6 +63,7 @@ export interface ChatSession {
   id: string
   title: string
   messages: Message[]
+  persistedSkills: string[]
   createdAt: string
   updatedAt: string
 }

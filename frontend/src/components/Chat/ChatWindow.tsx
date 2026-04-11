@@ -18,7 +18,7 @@ export function ChatWindow({ messages, isLoading }: Props) {
     <div style={{
       flex: 1,
       overflowY: 'auto',
-      padding: '24px 20px',
+      padding: '24px 48px',
       display: 'flex',
       flexDirection: 'column',
     }}>
@@ -34,9 +34,6 @@ export function ChatWindow({ messages, isLoading }: Props) {
         }}>
           <div style={{ fontSize: 32 }}>💬</div>
           <div style={{ fontSize: 15 }}>Ask anything to get started</div>
-          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            Try: "show me my campaigns" or "who am i?"
-          </div>
         </div>
       )}
 

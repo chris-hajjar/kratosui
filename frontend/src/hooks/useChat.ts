@@ -35,8 +35,10 @@ export function useChat() {
   const [isLoading, setIsLoading] = useState(false)
   const [sessions, setSessions] = useState<ChatSession[]>(loadSessions)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [persistedSkills, setPersistedSkills] = useState<string[]>([])
   const abortRef = useRef<AbortController | null>(null)
   const activeSessionIdRef = useRef<string | null>(null)
+  const persistedSkillsRef = useRef<string[]>([])
   const loadingSessionRef = useRef(false)
 
   // Auto-save sessions to localStorage.
@@ -56,6 +58,7 @@ export function useChat() {
 
     const now = new Date().toISOString()
     const title = generateTitle(messages)
+    const currentPersistedSkills = persistedSkillsRef.current
 
     // Resolve session ID synchronously before calling setSessions,
     // so we don't rely on mutations inside the updater running immediately.
@@ -70,8 +73,8 @@ export function useChat() {
     setSessions(prev => {
       const exists = prev.some(s => s.id === id)
       const updated = exists
-        ? prev.map(s => s.id === id ? { ...s, title, messages, updatedAt: now } : s)
-        : [{ id, title, messages, createdAt: now, updatedAt: now }, ...prev]
+        ? prev.map(s => s.id === id ? { ...s, title, messages, persistedSkills: currentPersistedSkills, updatedAt: now } : s)
+        : [{ id, title, messages, persistedSkills: currentPersistedSkills, createdAt: now, updatedAt: now }, ...prev]
       const sorted = updated.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       saveSessions(sorted)
       return sorted
@@ -80,6 +83,14 @@ export function useChat() {
 
   const sendMessage = useCallback(async (text: string, model: string = "openai:gpt-4o") => {
     if (!text.trim() || isLoading) return
+
+    // Ensure we have a session ID before sending
+    if (activeSessionIdRef.current === null) {
+      const newId = uid()
+      activeSessionIdRef.current = newId
+      setActiveSessionId(newId)
+    }
+    const sessionId = activeSessionIdRef.current!
 
     // Add user message
     const userMsg: Message = { id: uid(), role: 'user', content: text }
@@ -103,7 +114,13 @@ export function useChat() {
       const resp = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history, model }),
+        body: JSON.stringify({
+          message: text,
+          history,
+          model,
+          session_id: sessionId,
+          persisted_skills: persistedSkillsRef.current,
+        }),
         signal: abortRef.current.signal,
       })
 
@@ -138,16 +155,24 @@ export function useChat() {
           try { evt = JSON.parse(raw) } catch { continue }
 
           switch (evt.type) {
-            case 'skill_activated':
-              patch(m => ({
-                ...m,
-                skill: {
-                  name: evt.name as string,
-                  icon: evt.icon as string,
-                  category: evt.category as string,
-                } satisfies SkillBadge,
-              }))
+            case 'skill_activated': {
+              const badge: SkillBadge = {
+                name: evt.name as string,
+                icon: evt.icon as string,
+                category: evt.category as string,
+              }
+              patch(m => ({ ...m, skills: [...(m.skills ?? []), badge] }))
+              // If the skill is persistent, track it for future turns
+              if (evt.persist === true) {
+                const name = evt.name as string
+                if (!persistedSkillsRef.current.includes(name)) {
+                  const next = [...persistedSkillsRef.current, name]
+                  persistedSkillsRef.current = next
+                  setPersistedSkills(next)
+                }
+              }
               break
+            }
 
             case 'text_delta':
               patch(m => ({ ...m, content: m.content + (evt.content as string) }))
@@ -207,6 +232,8 @@ export function useChat() {
     setIsLoading(false)
     activeSessionIdRef.current = null
     setActiveSessionId(null)
+    persistedSkillsRef.current = []
+    setPersistedSkills([])
   }, [])
 
   const loadSession = useCallback((session: ChatSession) => {
@@ -217,6 +244,9 @@ export function useChat() {
     setIsLoading(false)
     activeSessionIdRef.current = session.id
     setActiveSessionId(session.id)
+    const restored = session.persistedSkills ?? []
+    persistedSkillsRef.current = restored
+    setPersistedSkills(restored)
   }, [])
 
   const deleteSession = useCallback((id: string) => {
@@ -229,6 +259,8 @@ export function useChat() {
       activeSessionIdRef.current = null
       setActiveSessionId(null)
       setMessages([])
+      persistedSkillsRef.current = []
+      setPersistedSkills([])
     }
   }, [])
 

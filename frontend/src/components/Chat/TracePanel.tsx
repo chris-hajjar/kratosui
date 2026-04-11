@@ -1,17 +1,29 @@
 import { useState } from 'react'
-import type { ToolCall, TraceReceipt } from '../../types'
+import type { ToolCall, TraceReceipt, SkillBadge } from '../../types'
 
 interface Props {
-  trace: TraceReceipt
+  trace?: TraceReceipt
+  skills?: SkillBadge[]
 }
 
-export function TracePanel({ trace }: Props) {
-  if (trace.tools.length === 0) return null
-  const multi = trace.tools.length > 1
+export function TracePanel({ trace, skills }: Props) {
+  const tools = trace?.tools ?? []
+  const skillList = skills ?? []
+  const total = skillList.length + tools.length
+  if (total === 0) return null
+  const multi = total > 1
+
+  type Item =
+    | { kind: 'skill'; skill: SkillBadge }
+    | { kind: 'tool'; tool: ToolCall }
+
+  const items: Item[] = [
+    ...skillList.map(s => ({ kind: 'skill' as const, skill: s })),
+    ...tools.map(t => ({ kind: 'tool' as const, tool: t })),
+  ]
 
   return (
     <div style={{ marginTop: 8, position: 'relative', paddingLeft: multi ? 16 : 0 }}>
-      {/* Vertical connecting line */}
       {multi && (
         <div style={{
           position: 'absolute',
@@ -23,10 +35,44 @@ export function TracePanel({ trace }: Props) {
         }} />
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {trace.tools.map((t, i) => (
-          <ToolRow key={i} tool={t} showDot={multi} />
-        ))}
+        {items.map((item, i) =>
+          item.kind === 'skill'
+            ? <SkillRow key={`skill-${i}`} skill={item.skill} showDot={multi} />
+            : <ToolRow key={`tool-${i}`} tool={item.tool} showDot={multi} />
+        )}
       </div>
+    </div>
+  )
+}
+
+function SkillRow({ skill, showDot }: { skill: SkillBadge; showDot?: boolean }) {
+  return (
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      {showDot && (
+        <div style={{
+          position: 'absolute',
+          left: -16,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          background: 'var(--bg-code)',
+          border: '1.5px solid var(--border)',
+        }} />
+      )}
+      <span style={{
+        background: 'var(--bg-input)',
+        border: '1px solid var(--border)',
+        borderRadius: 4,
+        padding: '5px 10px',
+        fontSize: 11,
+        color: 'var(--text-secondary)',
+        letterSpacing: '0.02em',
+        display: 'inline-block',
+      }}>
+        Reading {skill.name} skill
+      </span>
     </div>
   )
 }
@@ -36,7 +82,6 @@ function ToolRow({ tool, showDot }: { tool: ToolCall; showDot?: boolean }) {
 
   return (
     <div>
-      {/* Dot anchored to the badge, not the whole (possibly expanded) row */}
       <div style={{ position: 'relative', display: 'inline-block' }}>
         {showDot && (
           <div style={{
