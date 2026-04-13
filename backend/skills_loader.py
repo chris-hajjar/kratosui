@@ -15,13 +15,10 @@ _cache: dict[str, tuple[float, "Skill"]] = {}
 class Skill:
     name: str
     description: str
-    category: str
-    icon: str
     status: str
-    triggers: list[str]
+    when_to_use: str
     body: str
     filename: str
-    persist: bool = False
 
 
 def load_skills() -> list[Skill]:
@@ -34,17 +31,13 @@ def load_skills() -> list[Skill]:
                 skills.append(_cache[key][1])
                 continue
             post = frontmatter.load(str(path))
-            persist_val = post.get("persist", False)
             skill = Skill(
                 name=post.get("name", path.stem),
                 description=post.get("description", ""),
-                category=post.get("category", "General"),
-                icon=post.get("icon", "🔧"),
                 status=post.get("status", "active"),
-                triggers=post.get("triggers", []),
+                when_to_use=post.get("when_to_use", ""),
                 body=post.content.strip(),
                 filename=path.name,
-                persist=persist_val is not False,
             )
             _cache[key] = (mtime, skill)
             skills.append(skill)
@@ -53,17 +46,12 @@ def load_skills() -> list[Skill]:
     return skills
 
 
-def match_skills(message: str, skills: list[Skill]) -> list[Skill]:
-    msg = message.lower()
-    return [
-        s for s in skills
-        if s.status == "active" and any(t.lower() in msg for t in s.triggers)
-    ]
-
-
-def get_skills_by_name(names: list[str], all_skills: list[Skill]) -> list[Skill]:
-    name_set = set(names)
-    return [s for s in all_skills if s.name in name_set]
+def build_skill_index(skills: list[Skill]) -> str:
+    lines = ["## Available Skills"]
+    for s in skills:
+        lines.append(f"- **{s.name}**: {s.description} — When to use: {s.when_to_use}")
+    lines.append("\nCall get_skill(name) to load a skill's full instructions before responding if one is relevant.")
+    return "\n".join(lines)
 
 
 def save_skill(filename: str, data: dict) -> None:

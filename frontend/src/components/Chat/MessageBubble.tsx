@@ -2,6 +2,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Message } from '../../types'
 import { TracePanel } from './TracePanel'
+import { WidgetRenderer } from './WidgetRenderer'
 
 interface Props {
   message: Message
@@ -109,6 +110,11 @@ export function MessageBubble({ message }: Props) {
           </ReactMarkdown>
         )}
       </div>
+
+      {/* Widget charts */}
+      {message.widgets && message.widgets.length > 0 && (
+        <WidgetRenderer widgets={message.widgets} />
+      )}
 
       {/* Trace panel */}
       {(message.trace || (message.skills && message.skills.length > 0)) && (

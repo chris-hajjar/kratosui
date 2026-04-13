@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import type { Message, TraceReceipt, SkillBadge, ChatSession } from '../types'
+import type { Message, TraceReceipt, SkillBadge, ChatSession, Widget } from '../types'
 
 function uid() {
   return Math.random().toString(36).slice(2)
@@ -35,10 +35,8 @@ export function useChat() {
   const [isLoading, setIsLoading] = useState(false)
   const [sessions, setSessions] = useState<ChatSession[]>(loadSessions)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-  const [persistedSkills, setPersistedSkills] = useState<string[]>([])
   const abortRef = useRef<AbortController | null>(null)
   const activeSessionIdRef = useRef<string | null>(null)
-  const persistedSkillsRef = useRef<string[]>([])
   const loadingSessionRef = useRef(false)
 
   // Auto-save sessions to localStorage.
@@ -58,7 +56,6 @@ export function useChat() {
 
     const now = new Date().toISOString()
     const title = generateTitle(messages)
-    const currentPersistedSkills = persistedSkillsRef.current
 
     // Resolve session ID synchronously before calling setSessions,
     // so we don't rely on mutations inside the updater running immediately.
@@ -73,8 +70,8 @@ export function useChat() {
     setSessions(prev => {
       const exists = prev.some(s => s.id === id)
       const updated = exists
-        ? prev.map(s => s.id === id ? { ...s, title, messages, persistedSkills: currentPersistedSkills, updatedAt: now } : s)
-        : [{ id, title, messages, persistedSkills: currentPersistedSkills, createdAt: now, updatedAt: now }, ...prev]
+        ? prev.map(s => s.id === id ? { ...s, title, messages, updatedAt: now } : s)
+        : [{ id, title, messages, createdAt: now, updatedAt: now }, ...prev]
       const sorted = updated.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       saveSessions(sorted)
       return sorted
@@ -119,7 +116,6 @@ export function useChat() {
           history,
           model,
           session_id: sessionId,
-          persisted_skills: persistedSkillsRef.current,
         }),
         signal: abortRef.current.signal,
       })
@@ -156,21 +152,21 @@ export function useChat() {
 
           switch (evt.type) {
             case 'skill_activated': {
-              const badge: SkillBadge = {
-                name: evt.name as string,
-                icon: evt.icon as string,
-                category: evt.category as string,
-              }
+              const badge: SkillBadge = { name: evt.name as string }
               patch(m => ({ ...m, skills: [...(m.skills ?? []), badge] }))
-              // If the skill is persistent, track it for future turns
-              if (evt.persist === true) {
-                const name = evt.name as string
-                if (!persistedSkillsRef.current.includes(name)) {
-                  const next = [...persistedSkillsRef.current, name]
-                  persistedSkillsRef.current = next
-                  setPersistedSkills(next)
-                }
+              break
+            }
+
+            case 'widget': {
+              const widget: Widget = {
+                widget_type: evt.widget_type as Widget['widget_type'],
+                title: evt.title as string,
+                data: (evt.data as Record<string, unknown>[]) ?? [],
+                x_key: (evt.x_key as string) ?? 'date',
+                y_keys: (evt.y_keys as string[]) ?? [],
+                config: (evt.config as Record<string, unknown>) ?? {},
               }
+              patch(m => ({ ...m, widgets: [...(m.widgets ?? []), widget] }))
               break
             }
 
@@ -232,8 +228,6 @@ export function useChat() {
     setIsLoading(false)
     activeSessionIdRef.current = null
     setActiveSessionId(null)
-    persistedSkillsRef.current = []
-    setPersistedSkills([])
   }, [])
 
   const loadSession = useCallback((session: ChatSession) => {
@@ -244,9 +238,6 @@ export function useChat() {
     setIsLoading(false)
     activeSessionIdRef.current = session.id
     setActiveSessionId(session.id)
-    const restored = session.persistedSkills ?? []
-    persistedSkillsRef.current = restored
-    setPersistedSkills(restored)
   }, [])
 
   const deleteSession = useCallback((id: string) => {
@@ -259,8 +250,6 @@ export function useChat() {
       activeSessionIdRef.current = null
       setActiveSessionId(null)
       setMessages([])
-      persistedSkillsRef.current = []
-      setPersistedSkills([])
     }
   }, [])
 

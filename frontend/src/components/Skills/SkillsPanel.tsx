@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Skill } from '../../types'
 import { useSkills } from '../../hooks/useSkills'
 import { SkillCard } from './SkillCard'
@@ -9,8 +9,9 @@ interface Props {
 }
 
 export function SkillsPanel({ onClose }: Props) {
-  const { skills, loading, fetchSkills, saveSkill, createSkill, deleteSkill } = useSkills()
+  const { skills, loading, fetchSkills, saveSkill, createSkill, deleteSkill, uploadSkill } = useSkills()
   const [editing, setEditing] = useState<Skill | null | 'new'>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { fetchSkills() }, [fetchSkills])
 
@@ -26,6 +27,13 @@ export function SkillsPanel({ onClose }: Props) {
   const handleToggle = async (skill: Skill) => {
     const newStatus = skill.status === 'active' ? 'inactive' : 'active'
     await saveSkill(skill.filename, { ...skill, status: newStatus as 'active' | 'inactive' | 'beta' })
+  }
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    await uploadSkill(file)
+    e.target.value = ''
   }
 
   return (
@@ -83,11 +91,28 @@ export function SkillsPanel({ onClose }: Props) {
 
       {/* Footer */}
       {!editing && (
-        <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border-sub)' }}>
+        <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border-sub)', display: 'flex', gap: 8 }}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".md"
+            style={{ display: 'none' }}
+            onChange={handleFileUpload}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              flex: '0 0 auto', background: 'var(--btn-bg)', border: '1px solid var(--btn-border)',
+              borderRadius: 8, padding: '10px 14px', color: 'var(--btn-text)',
+              fontSize: 13, cursor: 'pointer',
+            }}
+          >
+            Upload .md
+          </button>
           <button
             onClick={() => setEditing('new')}
             style={{
-              width: '100%', background: 'var(--btn-bg)', border: '1px solid var(--btn-border)',
+              flex: 1, background: 'var(--btn-bg)', border: '1px solid var(--btn-border)',
               borderRadius: 8, padding: '10px', color: 'var(--btn-text)',
               fontSize: 13, cursor: 'pointer',
             }}

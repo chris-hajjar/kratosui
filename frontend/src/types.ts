@@ -14,8 +14,17 @@ export interface TraceReceipt {
 
 export interface SkillBadge {
   name: string
-  icon: string
-  category: string
+}
+
+export type WidgetType = 'candlestick' | 'line' | 'area' | 'bar' | 'gauge'
+
+export interface Widget {
+  widget_type: WidgetType
+  title: string
+  data: Record<string, unknown>[]
+  x_key: string
+  y_keys: string[]
+  config: Record<string, unknown>
 }
 
 export interface Message {
@@ -24,6 +33,7 @@ export interface Message {
   content: string
   skills?: SkillBadge[]
   trace?: TraceReceipt
+  widgets?: Widget[]
   isStreaming?: boolean
   error?: string
 }
@@ -31,13 +41,10 @@ export interface Message {
 export interface Skill {
   name: string
   description: string
-  category: string
-  icon: string
   status: 'active' | 'inactive' | 'beta'
-  triggers: string[]
+  when_to_use: string
   body: string
   filename: string
-  persist?: boolean
 }
 
 export interface MCPServer {
@@ -63,7 +70,6 @@ export interface ChatSession {
   id: string
   title: string
   messages: Message[]
-  persistedSkills: string[]
   createdAt: string
   updatedAt: string
 }

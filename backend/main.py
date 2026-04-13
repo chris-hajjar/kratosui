@@ -6,13 +6,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+import frontmatter
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from agent import startup_servers, shutdown_servers, reinitialize, reset_agent, stream_chat, refresh_server_info, get_server_health, get_server_tools
-from skills_loader import delete_skill, get_skills_by_name, load_skills, match_skills, save_skill
+from skills_loader import delete_skill, load_skills, save_skill
 from usage_tracker import get_logs, get_stats, get_tool_stats, init_db
 
 BASE_DIR = Path(__file__).parent
@@ -56,18 +57,14 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = []
     model: str = "openai:gpt-4o"
     session_id: str = ""
-    persisted_skills: list[str] = []
 
 
 class SkillPayload(BaseModel):
     name: str
     description: str = ""
-    category: str = "General"
-    icon: str = "🔧"
     status: str = "active"
-    triggers: list[str] = []
+    when_to_use: str = ""
     body: str = ""
-    persist: bool = False
 
 
 class MCPServerPayload(BaseModel):
@@ -85,43 +82,17 @@ class MCPServerPayload(BaseModel):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    all_skills = load_skills()
-    active = [s for s in all_skills if s.status == "active"]
-
-    # Newly triggered skills from the current message
-    matched = match_skills(req.message, active)
-    matched_names = {s.name for s in matched}
-
-    # Restore persisted skills from previous turns
-    persisted = get_skills_by_name(req.persisted_skills, all_skills)
-
-    # Merge: persisted first, then newly matched (deduplicated)
-    combined = persisted + [s for s in matched if s.name not in req.persisted_skills]
-
     async def event_stream():
-        # Emit skill_activated only for newly triggered skills
-        for skill in matched:
-            yield {
-                "data": json.dumps({
-                    "type": "skill_activated",
-                    "name": skill.name,
-                    "icon": skill.icon,
-                    "category": skill.category,
-                    "persist": skill.persist,
-                })
-            }
-
         history = [m.model_dump() for m in req.history]
         try:
-            async for event in stream_chat(req.message, history, combined, req.model, req.session_id):
+            async for event in stream_chat(req.message, history, req.model, req.session_id):
                 yield {"data": json.dumps(event)}
         except Exception as exc:
-            source = matched[0].name if matched else (persisted[0].name if persisted else "agent")
             yield {
                 "data": json.dumps({
                     "type": "error",
                     "message": str(exc),
-                    "source": source,
+                    "source": "agent",
                 })
             }
 
@@ -139,13 +110,10 @@ def get_skills():
         {
             "name": s.name,
             "description": s.description,
-            "category": s.category,
-            "icon": s.icon,
             "status": s.status,
-            "triggers": s.triggers,
+            "when_to_use": s.when_to_use,
             "body": s.body,
             "filename": s.filename,
-            "persist": s.persist,
         }
         for s in skills
     ]
@@ -156,6 +124,26 @@ def create_skill(payload: SkillPayload):
     filename = _skill_filename(payload.name)
     save_skill(filename, payload.model_dump())
     return {"filename": filename}
+
+
+@app.post("/api/skills/upload")
+async def upload_skill(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.endswith(".md"):
+        raise HTTPException(status_code=400, detail="Only .md files are accepted")
+    raw = await file.read()
+    text = raw.decode("utf-8")
+    post = frontmatter.loads(text)
+    stem = Path(file.filename).stem
+    skill_data = {
+        "name": post.get("name", stem),
+        "description": post.get("description", ""),
+        "status": post.get("status", "active"),
+        "when_to_use": post.get("when_to_use", ""),
+        "body": post.content.strip(),
+    }
+    filename = _skill_filename(skill_data["name"])
+    save_skill(filename, skill_data)
+    return {"filename": filename, "name": skill_data["name"]}
 
 
 @app.put("/api/skills/{filename}")

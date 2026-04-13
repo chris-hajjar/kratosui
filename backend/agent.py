@@ -5,14 +5,15 @@ import json
 import re
 import time
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.mcp import MCPServerStdio, MCPServerSSE, MCPServerStreamableHTTP
-from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart, ToolCallPart
 
-from skills_loader import Skill
+from skills_loader import Skill, load_skills, build_skill_index
 from tracer import extract_trace
 from usage_tracker import log_tool_calls, log_usage
 
@@ -26,7 +27,17 @@ BASE_SYSTEM_PROMPT = (
     "When tool results contain rows of data (a list of records), ALWAYS present them as a markdown table — never as nested bullet points. "
     "When a tool returns a simple flat list of strings (e.g. column names, field names), write them as a single line of comma-separated plain text — never as individual code blocks, code-formatted bullets, or multi-line lists. "
     "Reserve code formatting only for actual code snippets or query syntax. "
-    "If a tool call fails, explain what went wrong in plain language."
+    "If a tool call fails, explain what went wrong in plain language.\n\n"
+    "## Chart Rendering Rules\n"
+    "You have access to a render_chart tool. Use it proactively when data is visual:\n"
+    "- After get_price_history → always call render_chart(widget_type='candlestick', title='<SYMBOL> Price History', data=<candles>, x_key='date')\n"
+    "- After get_technical_indicators when RSI is present → call render_chart(widget_type='gauge', title='<SYMBOL> RSI (<period>)', data=[{'name': 'RSI', 'value': <rsi_value>}], y_keys=['value'])\n"
+    "- Multi-series price comparisons (multiple symbols) → widget_type='line', pass all series with y_keys listing each symbol\n"
+    "- Volume or categorical bar data → widget_type='bar'\n"
+    "- ALWAYS call render_chart BEFORE writing your text analysis so the chart appears above the text\n"
+    "- Do NOT describe what the chart looks like — provide analysis and insights instead\n"
+    "- You may call render_chart multiple times in a single response (e.g. candlestick + gauge)\n"
+    "- Pass the raw data array from the tool result directly — do not summarize or truncate it\n"
 )
 
 DEFAULT_INIT_TIMEOUT = 15.0
@@ -42,6 +53,11 @@ _exit_stack: AsyncExitStack | None = None
 _session_history: dict[str, list] = {}
 
 
+@dataclass
+class AgentDeps:
+    activated_skills: list[str] = field(default_factory=list)
+
+
 def _extract_error(exc: BaseException) -> str:
     """Pull a short, readable message out of an exception (including ExceptionGroups)."""
     # Unwrap ExceptionGroup — anyio wraps errors this way
@@ -54,6 +70,36 @@ def _extract_error(exc: BaseException) -> str:
         return m.group(1)
     # Trim extremely long messages
     return msg[:300]
+
+
+def extract_widgets(all_messages: list) -> list[dict]:
+    """Walk all_messages and extract render_chart ToolCallPart args as widget SSE dicts."""
+    widgets = []
+    for msg in all_messages:
+        parts = getattr(msg, "parts", [])
+        for part in parts:
+            if not isinstance(part, ToolCallPart):
+                continue
+            if part.tool_name != "render_chart":
+                continue
+            try:
+                args = part.args_as_dict()
+            except Exception:
+                continue
+            widget_type = args.get("widget_type")
+            data = args.get("data")
+            if not widget_type or not data:
+                continue
+            widgets.append({
+                "type": "widget",
+                "widget_type": widget_type,
+                "title": args.get("title", ""),
+                "data": data,
+                "x_key": args.get("x_key", "date"),
+                "y_keys": args.get("y_keys") or [],
+                "config": args.get("config") or {},
+            })
+    return widgets
 
 
 def _load_server_objects() -> None:
@@ -92,6 +138,23 @@ async def _try_start(exit_stack: AsyncExitStack, name: str, server: MCPServerStd
         return False
 
 
+def _register_function_tools(agent: Agent) -> None:
+    """Register the get_skill function tool on the agent."""
+
+    @agent.tool
+    def get_skill(ctx: RunContext[AgentDeps], name: str) -> str:
+        """Load a skill's full instructions by name. Call this when a skill is relevant to the user's request."""
+        skills = load_skills()
+        active = [s for s in skills if s.status == "active"]
+        match = next((s for s in active if s.name.lower() == name.lower()), None)
+        if match is None:
+            valid = ", ".join(s.name for s in active)
+            return f"Skill '{name}' not found. Valid active skills: {valid}"
+        if match.name not in ctx.deps.activated_skills:
+            ctx.deps.activated_skills.append(match.name)
+        return match.body
+
+
 async def startup_servers() -> None:
     """Start all configured MCP servers gracefully. Failed servers are recorded but don't crash startup."""
     global _agent, _exit_stack
@@ -109,7 +172,8 @@ async def startup_servers() -> None:
             working.append(server)
 
     _exit_stack = stack
-    _agent = Agent("openai:gpt-4o", toolsets=working, system_prompt=BASE_SYSTEM_PROMPT)
+    _agent = Agent("openai:gpt-4o", toolsets=working, system_prompt=BASE_SYSTEM_PROMPT, deps_type=AgentDeps)
+    _register_function_tools(_agent)
 
 
 async def shutdown_servers() -> None:
@@ -183,7 +247,6 @@ def build_history(messages: list[dict]) -> list:
 async def stream_chat(
     message: str,
     history: list[dict],
-    skills: list[Skill],
     model: str = "openai:gpt-4o",
     session_id: str = "",
 ):
@@ -196,14 +259,12 @@ async def stream_chat(
     else:
         msg_history = build_history(history)
 
-    # Build combined instructions from all matched skills
-    if skills:
-        parts = [f"### Skill: {s.name}\n{s.body}" for s in skills]
-        instructions = "\n\n---\n\n".join(parts)
-    else:
-        instructions = None
+    # Build skill index from active skills and inject as instructions
+    all_skills = load_skills()
+    active_skills = [s for s in all_skills if s.status == "active"]
+    instructions = build_skill_index(active_skills) if active_skills else None
 
-    skill_names = ", ".join(s.name for s in skills) if skills else None
+    deps = AgentDeps()
     start = time.monotonic()
 
     async with agent.run_stream(
@@ -211,6 +272,7 @@ async def stream_chat(
         instructions=instructions,
         message_history=msg_history,
         model=model,
+        deps=deps,
     ) as result:
         async for delta in result.stream_text(delta=True):
             yield {"type": "text_delta", "content": delta}
@@ -222,7 +284,19 @@ async def stream_chat(
         if session_id:
             _session_history[session_id] = all_msgs
 
-        trace = extract_trace(all_msgs, skill_names, total_ms)
+        new_msgs = all_msgs[len(msg_history):]
+        for widget in extract_widgets(new_msgs):
+            yield widget
+
+        # Emit skill_activated events for skills the model loaded via get_skill
+        emitted: set[str] = set()
+        for name in deps.activated_skills:
+            if name not in emitted:
+                emitted.add(name)
+                yield {"type": "skill_activated", "name": name}
+
+        skill_names = ", ".join(deps.activated_skills) if deps.activated_skills else None
+        trace = extract_trace(new_msgs, skill_names, total_ms)
 
         usage = result.usage()
         request_id = log_usage(

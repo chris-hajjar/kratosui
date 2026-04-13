@@ -38,5 +38,12 @@ export function useSkills() {
     await fetchSkills()
   }, [fetchSkills])
 
-  return { skills, loading, fetchSkills, saveSkill, createSkill, deleteSkill }
+  const uploadSkill = useCallback(async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    await fetch('/api/skills/upload', { method: 'POST', body: form })
+    await fetchSkills()
+  }, [fetchSkills])
+
+  return { skills, loading, fetchSkills, saveSkill, createSkill, deleteSkill, uploadSkill }
 }
