@@ -29,6 +29,7 @@ export function MCPPanel({ onClose }: Props) {
   const [formType, setFormType] = useState<FormType>('stdio')
   const [form, setForm] = useState(EMPTY_FORM)
   const [extraHeaders, setExtraHeaders] = useState<{ k: string; v: string }[]>([])
+  const [awaitingAuth, setAwaitingAuth] = useState<Set<string>>(new Set())
   const fetchServers = async () => {
     setLoading(true)
     try {
@@ -63,6 +64,32 @@ export function MCPPanel({ onClose }: Props) {
   }
 
   useEffect(() => { fetchServers() }, [])
+
+  // Poll /api/mcp/status every 2s while any server is awaiting OAuth completion
+  useEffect(() => {
+    if (awaitingAuth.size === 0) return
+    const interval = setInterval(async () => {
+      try {
+        const statusRes: Record<string, MCPHealth> = await fetch('/api/mcp/status').then(r => r.json())
+        setHealth(prev => {
+          const next = { ...prev }
+          for (const [name, h] of Object.entries(statusRes)) next[name] = h
+          return next
+        })
+        setAwaitingAuth(prev => {
+          const next = new Set(prev)
+          for (const name of prev) {
+            if (statusRes[name]?.status === 'ok') {
+              next.delete(name)
+              setTools(t => { const nt = { ...t }; delete nt[name]; return nt })
+            }
+          }
+          return next
+        })
+      } catch { /* silent */ }
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [awaitingAuth.size])
 
   const handleBrowse = async () => {
     const res = await fetch('/api/browse').then(r => r.json())
@@ -204,6 +231,7 @@ export function MCPPanel({ onClose }: Props) {
                         : h.status === 'ok' ? '#22c55e'
                         : h.status === 'error' ? '#ef4444'
                         : h.status === 'connecting' ? '#3b82f6'
+                        : h.status === 'needs_auth' ? '#f59e0b'
                         : '#555',
                     }} />
 
@@ -254,7 +282,37 @@ export function MCPPanel({ onClose }: Props) {
                       borderTop: '1px solid var(--border-sub)',
                       padding: '10px 14px 12px',
                     }}>
-                      {h?.status === 'error' ? (
+                      {h?.status === 'needs_auth' ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <div style={{ fontSize: 12, color: '#f59e0b' }}>
+                            {h.message ?? 'OAuth authentication required'}
+                          </div>
+                          <button
+                            onClick={() => {
+                              window.open(h.auth_url, '_blank')
+                              setAwaitingAuth(prev => new Set(prev).add(s.name))
+                            }}
+                            style={{
+                              alignSelf: 'flex-start',
+                              background: '#f59e0b',
+                              border: 'none',
+                              borderRadius: 6,
+                              padding: '6px 14px',
+                              color: '#000',
+                              fontSize: 12,
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Connect
+                          </button>
+                          {awaitingAuth.has(s.name) && (
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                              Waiting for authentication…
+                            </div>
+                          )}
+                        </div>
+                      ) : h?.status === 'error' ? (
                         <div style={{ fontSize: 12, color: '#ef4444' }}>
                           Error: {h.message ?? 'Server failed to connect'}
                         </div>
@@ -418,7 +476,7 @@ export function MCPPanel({ onClose }: Props) {
       {!adding && (
         <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border-sub)', flexShrink: 0 }}>
           <button
-            onClick={() => { setAdding(true); setNote('') }}
+            onClick={() => { setAdding(true) }}
             style={{
               width: '100%', background: 'var(--btn-bg)', border: '1px solid var(--btn-border)',
               borderRadius: 8, padding: '10px', color: 'var(--btn-text)',

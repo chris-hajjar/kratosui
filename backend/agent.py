@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import re
+import secrets
 import time
+import urllib.parse
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import httpx
 
 from dotenv import load_dotenv
 from pydantic_ai import Agent, RunContext
@@ -67,9 +73,40 @@ _server_timeouts: dict[str, float] = {}
 _server_health: dict[str, dict] = {}
 _server_tools: dict[str, list] = {}
 _exit_stack: AsyncExitStack | None = None
+_pending_oauth: dict[str, dict] = {}  # server_name -> {code_verifier, state, redirect_uri, token_endpoint, client_id}
 
 # Cross-turn tool history: session_id -> list of pydantic-ai ModelMessage objects
 _session_history: dict[str, list] = {}
+
+
+def _generate_pkce() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) using S256 method."""
+    code_verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return code_verifier, code_challenge
+
+
+async def _discover_oauth(server_url: str) -> dict | None:
+    """Fetch /.well-known/oauth-authorization-server from the server's origin. Returns metadata or None."""
+    parsed = urllib.parse.urlparse(server_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{origin}/.well-known/oauth-authorization-server")
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception:
+        pass
+    return None
+
+
+def get_pending_oauth(name: str) -> dict | None:
+    return _pending_oauth.get(name)
+
+
+def clear_pending_oauth(name: str) -> None:
+    _pending_oauth.pop(name, None)
 
 
 @dataclass
@@ -111,7 +148,7 @@ def _load_server_objects() -> None:
         _server_timeouts[name] = float(cfg.get("initTimeout", DEFAULT_INIT_TIMEOUT))
 
 
-async def _try_start(exit_stack: AsyncExitStack, name: str, server: MCPServerStdio | MCPServerSSE) -> bool:
+async def _try_start(exit_stack: AsyncExitStack, name: str, server) -> bool:
     """Attempt to start a single server. Updates _server_health. Returns True on success."""
     timeout = _server_timeouts.get(name, DEFAULT_INIT_TIMEOUT)
     _server_health[name] = {"status": "connecting"}
@@ -123,7 +160,60 @@ async def _try_start(exit_stack: AsyncExitStack, name: str, server: MCPServerStd
         _server_health[name] = {"status": "error", "message": f"Timed out after {timeout:.0f}s"}
         return False
     except BaseException as exc:
-        _server_health[name] = {"status": "error", "message": _extract_error(exc)}
+        msg = _extract_error(exc)
+        # 401 → attempt OAuth discovery
+        if "401" in msg and hasattr(server, "url"):
+            metadata = await _discover_oauth(server.url)
+            if metadata:
+                authorization_endpoint = metadata.get("authorization_endpoint")
+                token_endpoint = metadata.get("token_endpoint")
+                registration_endpoint = metadata.get("registration_endpoint")
+                if authorization_endpoint and token_endpoint:
+                    code_verifier, code_challenge = _generate_pkce()
+                    random_state = secrets.token_urlsafe(16)
+                    state = f"{name}:{random_state}"
+                    redirect_uri = "http://localhost:8000/api/mcp/oauth/callback"
+                    client_id = "kratos-ui"
+                    # Try dynamic client registration if the server supports it
+                    if registration_endpoint:
+                        try:
+                            async with httpx.AsyncClient(timeout=5.0) as client:
+                                reg_resp = await client.post(
+                                    registration_endpoint,
+                                    json={
+                                        "client_name": "Kratos UI",
+                                        "redirect_uris": [redirect_uri],
+                                        "grant_types": ["authorization_code"],
+                                        "response_types": ["code"],
+                                        "token_endpoint_auth_method": "none",
+                                    },
+                                )
+                                if reg_resp.status_code in (200, 201):
+                                    client_id = reg_resp.json().get("client_id", client_id)
+                        except Exception:
+                            pass
+                    auth_url = authorization_endpoint + "?" + urllib.parse.urlencode({
+                        "response_type": "code",
+                        "client_id": client_id,
+                        "redirect_uri": redirect_uri,
+                        "state": state,
+                        "code_challenge": code_challenge,
+                        "code_challenge_method": "S256",
+                    })
+                    _pending_oauth[name] = {
+                        "code_verifier": code_verifier,
+                        "state": state,
+                        "redirect_uri": redirect_uri,
+                        "token_endpoint": token_endpoint,
+                        "client_id": client_id,
+                    }
+                    _server_health[name] = {
+                        "status": "needs_auth",
+                        "auth_url": auth_url,
+                        "message": "OAuth authentication required — click Connect to authorise",
+                    }
+                    return False
+        _server_health[name] = {"status": "error", "message": msg}
         return False
 
 

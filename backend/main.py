@@ -7,12 +7,18 @@ from pathlib import Path
 from typing import Any
 
 import frontmatter
+import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from agent import startup_servers, shutdown_servers, reinitialize, reset_agent, stream_chat, refresh_server_info, get_server_health, get_server_tools
+from agent import (
+    startup_servers, shutdown_servers, reinitialize, reset_agent,
+    stream_chat, refresh_server_info, get_server_health, get_server_tools,
+    get_pending_oauth, clear_pending_oauth,
+)
 from skills_loader import delete_skill, load_skills, save_skill
 from usage_tracker import get_logs, get_stats, get_tool_stats, init_db
 
@@ -257,6 +263,56 @@ async def reinitialize_mcp():
     return {"ok": True, "health": health}
 
 
+@app.get("/api/mcp/oauth/callback", response_class=HTMLResponse)
+async def mcp_oauth_callback(code: str, state: str):
+    """OAuth redirect target. Exchanges the auth code for a bearer token and reconnects the server."""
+    if ":" not in state:
+        return HTMLResponse(_oauth_page("error", "Invalid state parameter."), status_code=400)
+
+    server_name, _ = state.split(":", 1)
+    pending = get_pending_oauth(server_name)
+
+    if pending is None:
+        return HTMLResponse(_oauth_page("error", "No pending OAuth session for this server."), status_code=400)
+    if pending["state"] != state:
+        return HTMLResponse(_oauth_page("error", "State mismatch — possible CSRF."), status_code=400)
+
+    # Exchange code for token
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            token_resp = await client.post(
+                pending["token_endpoint"],
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": pending["redirect_uri"],
+                    "client_id": pending["client_id"],
+                    "code_verifier": pending["code_verifier"],
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            token_resp.raise_for_status()
+            token_data = token_resp.json()
+    except Exception as exc:
+        return HTMLResponse(_oauth_page("error", f"Token exchange failed: {exc}"), status_code=502)
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return HTMLResponse(_oauth_page("error", "No access_token in response."), status_code=502)
+
+    # Persist token into mcp_config.json
+    config = json.loads(MCP_CONFIG_PATH.read_text())
+    srv_cfg = config["mcpServers"].get(server_name, {})
+    srv_cfg.setdefault("headers", {})["Authorization"] = f"Bearer {access_token}"
+    config["mcpServers"][server_name] = srv_cfg
+    MCP_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+
+    clear_pending_oauth(server_name)
+    await reinitialize()
+
+    return HTMLResponse(_oauth_page("success", server_name))
+
+
 # ---------------------------------------------------------------------------
 # Usage / cost tracking
 # ---------------------------------------------------------------------------
@@ -279,6 +335,36 @@ def usage_tools():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _oauth_page(result: str, detail: str = "") -> str:
+    """Return a self-closing HTML page shown in the OAuth redirect tab."""
+    if result == "success":
+        title = "Connected!"
+        body = f"<p>Successfully authenticated <strong>{detail}</strong>.</p><p>This tab will close automatically.</p>"
+        script = "setTimeout(() => window.close(), 1500);"
+        color = "#22c55e"
+    else:
+        title = "Authentication Failed"
+        body = f"<p style='color:#ef4444'>{detail}</p><p>You may close this tab.</p>"
+        script = ""
+        color = "#ef4444"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>{title}</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; display: flex; align-items: center;
+         justify-content: center; min-height: 100vh; margin: 0;
+         background: #0f0f0f; color: #e5e5e5; }}
+  .card {{ background: #1a1a1a; border: 1px solid #333; border-radius: 12px;
+           padding: 40px 48px; text-align: center; max-width: 420px; }}
+  h1 {{ color: {color}; margin-top: 0; }}
+</style>
+</head>
+<body>
+  <div class="card"><h1>{title}</h1>{body}</div>
+  <script>{script}</script>
+</body></html>"""
+
 
 def _skill_filename(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")

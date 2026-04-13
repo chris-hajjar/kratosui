@@ -69,8 +69,9 @@ export interface MCPTool {
 }
 
 export interface MCPHealth {
-  status: 'ok' | 'error' | 'connecting' | 'loading'
+  status: 'ok' | 'error' | 'connecting' | 'loading' | 'needs_auth'
   message?: string
+  auth_url?: string
 }
 
 export interface ChatSession {
