@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 from agent import (
     startup_servers, shutdown_servers, reinitialize, reset_agent,
     stream_chat, refresh_server_info, get_server_health, get_server_tools,
+    get_server_enabled, get_server_disabled_tools,
     get_pending_oauth, clear_pending_oauth,
 )
 from skills_loader import delete_skill, load_skills, save_skill
@@ -180,6 +181,8 @@ def get_mcp():
             "args": cfg.get("args", []),
             "url": cfg.get("url", ""),
             "headers": cfg.get("headers", {}),
+            "enabled": cfg.get("enabled", True),
+            "disabledTools": cfg.get("disabledTools", []),
         })
     return servers
 
@@ -215,7 +218,39 @@ def mcp_status():
 
 @app.get("/api/mcp/{name}/tools")
 def mcp_tools(name: str):
-    return get_server_tools(name)
+    disabled = set(get_server_disabled_tools(name))
+    return [
+        {**t, "enabled": t["name"] not in disabled}
+        for t in get_server_tools(name)
+    ]
+
+
+@app.patch("/api/mcp/{name}/enabled")
+async def set_server_enabled(name: str, body: dict):
+    config = json.loads(MCP_CONFIG_PATH.read_text())
+    if name not in config["mcpServers"]:
+        raise HTTPException(status_code=404, detail="Server not found")
+    config["mcpServers"][name]["enabled"] = body["enabled"]
+    MCP_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    health = await reinitialize()
+    return {"ok": True, "health": health}
+
+
+@app.patch("/api/mcp/{name}/tools/{tool_name}/enabled")
+async def set_tool_enabled(name: str, tool_name: str, body: dict):
+    config = json.loads(MCP_CONFIG_PATH.read_text())
+    if name not in config["mcpServers"]:
+        raise HTTPException(status_code=404, detail="Server not found")
+    srv = config["mcpServers"][name]
+    disabled = set(srv.get("disabledTools", []))
+    if body["enabled"]:
+        disabled.discard(tool_name)
+    else:
+        disabled.add(tool_name)
+    srv["disabledTools"] = sorted(disabled)
+    MCP_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    health = await reinitialize()
+    return {"ok": True, "health": health}
 
 
 def _build_mcp_entry(payload: MCPServerPayload) -> dict:

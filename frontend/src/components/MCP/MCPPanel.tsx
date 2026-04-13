@@ -18,6 +18,27 @@ function inferCommand(filePath: string): { command: string; args: string[] } {
   return { command: filePath, args: [] }
 }
 
+function Toggle({ on, onChange, disabled }: { on: boolean; onChange: () => void; disabled?: boolean }) {
+  return (
+    <button
+      onClick={e => { e.stopPropagation(); onChange() }}
+      disabled={disabled}
+      style={{
+        width: 32, height: 18, borderRadius: 9, border: 'none', cursor: disabled ? 'default' : 'pointer',
+        background: on ? '#3b82f6' : 'var(--border)',
+        position: 'relative', flexShrink: 0, transition: 'background 0.15s',
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      <div style={{
+        position: 'absolute', top: 2, left: on ? 16 : 2,
+        width: 14, height: 14, borderRadius: '50%', background: '#fff',
+        transition: 'left 0.15s',
+      }} />
+    </button>
+  )
+}
+
 export function MCPPanel({ onClose }: Props) {
   const [servers, setServers] = useState<MCPServer[]>([])
   const [health, setHealth] = useState<Record<string, MCPHealth>>({})
@@ -30,6 +51,11 @@ export function MCPPanel({ onClose }: Props) {
   const [form, setForm] = useState(EMPTY_FORM)
   const [extraHeaders, setExtraHeaders] = useState<{ k: string; v: string }[]>([])
   const [awaitingAuth, setAwaitingAuth] = useState<Set<string>>(new Set())
+  const [serverEnabled, setServerEnabled] = useState<Record<string, boolean>>({})
+  const [toolEnabled, setToolEnabled] = useState<Record<string, Record<string, boolean>>>({})
+  const [togglingServer, setTogglingServer] = useState<Set<string>>(new Set())
+  const [togglingTool, setTogglingTool] = useState<Set<string>>(new Set())
+
   const fetchServers = async () => {
     setLoading(true)
     try {
@@ -39,10 +65,13 @@ export function MCPPanel({ onClose }: Props) {
       ])
       setServers(serversRes)
       const h: Record<string, MCPHealth> = {}
+      const se: Record<string, boolean> = {}
       for (const s of serversRes) {
         h[s.name] = statusRes[s.name] ?? { status: 'loading' }
+        se[s.name] = s.enabled
       }
       setHealth(h)
+      setServerEnabled(se)
     } finally {
       setLoading(false)
     }
@@ -52,6 +81,10 @@ export function MCPPanel({ onClose }: Props) {
     if (tools[name]) return
     const data: MCPTool[] = await fetch(`/api/mcp/${name}/tools`).then(r => r.json())
     setTools(t => ({ ...t, [name]: data }))
+    setToolEnabled(prev => ({
+      ...prev,
+      [name]: Object.fromEntries(data.map(t => [t.name, t.enabled])),
+    }))
   }
 
   const toggleExpand = (name: string) => {
@@ -60,6 +93,60 @@ export function MCPPanel({ onClose }: Props) {
     } else {
       setExpanded(name)
       fetchTools(name)
+    }
+  }
+
+  const toggleServer = async (name: string) => {
+    const newVal = !serverEnabled[name]
+    setServerEnabled(prev => ({ ...prev, [name]: newVal }))
+    setTogglingServer(prev => new Set(prev).add(name))
+    try {
+      const res = await fetch(`/api/mcp/${name}/enabled`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newVal }),
+      })
+      const data = await res.json()
+      if (data.health) {
+        setHealth(prev => {
+          const next = { ...prev }
+          for (const [k, v] of Object.entries(data.health as Record<string, MCPHealth>)) next[k] = v
+          return next
+        })
+      }
+      // Clear tool cache for this server so next expansion gets fresh data
+      setTools(t => { const nt = { ...t }; delete nt[name]; return nt })
+      setToolEnabled(prev => { const nt = { ...prev }; delete nt[name]; return nt })
+      await fetchServers()
+    } finally {
+      setTogglingServer(prev => { const s = new Set(prev); s.delete(name); return s })
+    }
+  }
+
+  const toggleTool = async (serverName: string, toolName: string) => {
+    const key = `${serverName}/${toolName}`
+    const newVal = !(toolEnabled[serverName]?.[toolName] ?? true)
+    setToolEnabled(prev => ({
+      ...prev,
+      [serverName]: { ...prev[serverName], [toolName]: newVal },
+    }))
+    setTogglingTool(prev => new Set(prev).add(key))
+    try {
+      const res = await fetch(`/api/mcp/${serverName}/tools/${toolName}/enabled`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newVal }),
+      })
+      const data = await res.json()
+      if (data.health) {
+        setHealth(prev => {
+          const next = { ...prev }
+          for (const [k, v] of Object.entries(data.health as Record<string, MCPHealth>)) next[k] = v
+          return next
+        })
+      }
+    } finally {
+      setTogglingTool(prev => { const s = new Set(prev); s.delete(key); return s })
     }
   }
 
@@ -206,6 +293,9 @@ export function MCPPanel({ onClose }: Props) {
               const isExpanded = expanded === s.name
               const serverTools = tools[s.name]
 
+              const svrOn = serverEnabled[s.name] ?? true
+              const svrToggling = togglingServer.has(s.name)
+
               return (
                 <div key={s.name} style={{
                   background: 'var(--bg-card)',
@@ -224,44 +314,44 @@ export function MCPPanel({ onClose }: Props) {
                       gap: 10,
                     }}
                   >
-                    {/* Health dot */}
-                    <div style={{
-                      width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                      background: !h ? '#555'
-                        : h.status === 'ok' ? '#22c55e'
-                        : h.status === 'error' ? '#ef4444'
-                        : h.status === 'connecting' ? '#3b82f6'
-                        : h.status === 'needs_auth' ? '#f59e0b'
-                        : '#555',
-                    }} />
-
-                    {/* Name + type badge */}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 14 }}>
-                          {s.name}
-                        </span>
-                        <span style={{
-                          fontSize: 10, padding: '1px 7px', borderRadius: 20,
-                          border: '1px solid var(--border)',
-                          color: 'var(--text-muted)',
-                          letterSpacing: '0.04em',
-                        }}>
-                          {s.type === 'streamable-http' ? 'HTTP' : s.type === 'sse' ? 'SSE' : 'Local'}
-                        </span>
-                      </div>
+                    {/* Health dot + name (dimmed when disabled) */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0, opacity: svrOn ? 1 : 0.5 }}>
                       <div style={{
-                        fontFamily: 'monospace', fontSize: 11, color: 'var(--text-muted)', marginTop: 3,
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      }}>
-                        {s.type === 'sse' || s.type === 'streamable-http' ? s.url : `${s.command} ${(s.args ?? []).join(' ')}`}
+                        width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                        background: !h ? '#555'
+                          : h.status === 'ok' ? '#22c55e'
+                          : h.status === 'error' ? '#ef4444'
+                          : h.status === 'connecting' ? '#3b82f6'
+                          : h.status === 'needs_auth' ? '#f59e0b'
+                          : '#555',
+                      }} />
+
+                      {/* Name + type badge */}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 14 }}>
+                            {s.name}
+                          </span>
+                          <span style={{
+                            fontSize: 10, padding: '1px 7px', borderRadius: 20,
+                            border: '1px solid var(--border)',
+                            color: 'var(--text-muted)',
+                            letterSpacing: '0.04em',
+                          }}>
+                            {s.type === 'streamable-http' ? 'HTTP' : s.type === 'sse' ? 'SSE' : 'Local'}
+                          </span>
+                        </div>
+                        <div style={{
+                          fontFamily: 'monospace', fontSize: 11, color: 'var(--text-muted)', marginTop: 3,
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}>
+                          {s.type === 'sse' || s.type === 'streamable-http' ? s.url : `${s.command} ${(s.args ?? []).join(' ')}`}
+                        </div>
                       </div>
                     </div>
 
-                    {/* Chevron */}
-                    <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>
-                      {isExpanded ? '▾' : '▸'}
-                    </span>
+                    {/* Server toggle */}
+                    <Toggle on={svrOn} onChange={() => toggleServer(s.name)} disabled={svrToggling} />
 
                     {/* Remove */}
                     <button
@@ -321,22 +411,26 @@ export function MCPPanel({ onClose }: Props) {
                       ) : serverTools.length === 0 ? (
                         <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>No tools registered</div>
                       ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
                             {serverTools.length} tool{serverTools.length !== 1 ? 's' : ''}
                           </div>
-                          {serverTools.map(t => (
-                            <div key={t.name} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                              <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#60a5fa' }}>
-                                {t.name}
-                              </span>
-                              {t.description && (
-                                <span style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 2 }}>
-                                  {t.description}
+                          {serverTools.map(t => {
+                            const toolOn = toolEnabled[s.name]?.[t.name] ?? true
+                            const toolKey = `${s.name}/${t.name}`
+                            const toolToggling = togglingTool.has(toolKey)
+                            return (
+                              <div key={t.name} style={{
+                                display: 'flex', alignItems: 'center', gap: 8,
+                                opacity: toolOn ? 1 : 0.5,
+                              }}>
+                                <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#60a5fa', flex: 1, minWidth: 0 }}>
+                                  {t.name}
                                 </span>
-                              )}
-                            </div>
-                          ))}
+                                <Toggle on={toolOn} onChange={() => toggleTool(s.name, t.name)} disabled={toolToggling || !svrOn} />
+                              </div>
+                            )
+                          })}
                         </div>
                       )}
                     </div>

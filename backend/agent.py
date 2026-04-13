@@ -75,6 +75,9 @@ _server_tools: dict[str, list] = {}
 _exit_stack: AsyncExitStack | None = None
 _pending_oauth: dict[str, dict] = {}  # server_name -> {code_verifier, state, redirect_uri, token_endpoint, client_id}
 
+_server_enabled: dict[str, bool] = {}
+_server_disabled_tools: dict[str, set[str]] = {}
+
 # Cross-turn tool history: session_id -> list of pydantic-ai ModelMessage objects
 _session_history: dict[str, list] = {}
 
@@ -129,11 +132,13 @@ def _extract_error(exc: BaseException) -> str:
 
 
 def _load_server_objects() -> None:
-    """Read mcp_config.json and populate _servers / _server_timeouts."""
-    global _servers, _server_timeouts
+    """Read mcp_config.json and populate _servers / _server_timeouts / _server_enabled / _server_disabled_tools."""
+    global _servers, _server_timeouts, _server_enabled, _server_disabled_tools
     config = json.loads(MCP_CONFIG_PATH.read_text())
     _servers = {}
     _server_timeouts = {}
+    _server_enabled = {}
+    _server_disabled_tools = {}
     for name, cfg in config["mcpServers"].items():
         server_type = cfg.get("type", "stdio")
         if server_type == "streamable-http":
@@ -146,6 +151,8 @@ def _load_server_objects() -> None:
             server = MCPServerStdio(cfg["command"], args=cfg.get("args", []))
         _servers[name] = server
         _server_timeouts[name] = float(cfg.get("initTimeout", DEFAULT_INIT_TIMEOUT))
+        _server_enabled[name] = cfg.get("enabled", True)
+        _server_disabled_tools[name] = set(cfg.get("disabledTools", []))
 
 
 async def _try_start(exit_stack: AsyncExitStack, name: str, server) -> bool:
@@ -244,11 +251,19 @@ async def startup_servers() -> None:
     stack = AsyncExitStack()
     await stack.__aenter__()
 
-    working: list[MCPServerStdio | MCPServerSSE] = []
+    working = []
     for name, server in _servers.items():
+        if not _server_enabled.get(name, True):
+            _server_health[name] = {"status": "disabled"}
+            continue
         ok = await _try_start(stack, name, server)
         if ok:
-            working.append(server)
+            disabled = _server_disabled_tools.get(name, set())
+            if disabled:
+                toolset = server.filtered(lambda ctx, td, d=disabled: td.name not in d)
+            else:
+                toolset = server
+            working.append(toolset)
 
     _exit_stack = stack
     _agent = Agent("openai:gpt-4o", toolsets=working, system_prompt=BASE_SYSTEM_PROMPT, deps_type=AgentDeps)
@@ -276,7 +291,11 @@ async def reinitialize() -> dict:
 async def refresh_server_info() -> None:
     """Populate tool list for each connected server."""
     for name, server in _servers.items():
-        if _server_health.get(name, {}).get("status") != "ok":
+        status = _server_health.get(name, {}).get("status")
+        if status == "disabled":
+            # Preserve existing tool cache so frontend can still show toggles
+            continue
+        if status != "ok":
             _server_tools[name] = []
             continue
         try:
@@ -296,6 +315,14 @@ def get_server_health() -> dict:
 
 def get_server_tools(name: str) -> list:
     return _server_tools.get(name, [])
+
+
+def get_server_enabled() -> dict[str, bool]:
+    return _server_enabled.copy()
+
+
+def get_server_disabled_tools(name: str) -> list[str]:
+    return list(_server_disabled_tools.get(name, set()))
 
 
 def get_agent() -> Agent:

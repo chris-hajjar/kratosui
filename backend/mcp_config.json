@@ -6,6 +6,21 @@
       "args": [
         "yahoo_server.py"
       ]
+    },
+    "OpenMemory": {
+      "type": "streamable-http",
+      "url": "https://openmemory-mauve.vercel.app/api/mcp",
+      "headers": {
+        "Authorization": "Bearer REDACTED"
+      },
+      "disabledTools": [
+        "delete_record",
+        "get_table_schema",
+        "read_records",
+        "save_record",
+        "search_records",
+        "update_record"
+      ]
     }
   }
 }

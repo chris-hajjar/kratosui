@@ -61,15 +61,18 @@ export interface MCPServer {
   args?: string[]
   url?: string
   headers?: Record<string, string>
+  enabled: boolean
+  disabledTools: string[]
 }
 
 export interface MCPTool {
   name: string
   description: string
+  enabled: boolean
 }
 
 export interface MCPHealth {
-  status: 'ok' | 'error' | 'connecting' | 'loading' | 'needs_auth'
+  status: 'ok' | 'error' | 'connecting' | 'loading' | 'needs_auth' | 'disabled'
   message?: string
   auth_url?: string
 }
