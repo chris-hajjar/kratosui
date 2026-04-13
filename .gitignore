@@ -2,6 +2,9 @@
 .env
 .env.*
 
+# Local config (may contain tokens)
+backend/mcp_config.json
+
 # Python
 backend/.venv/
 __pycache__/
