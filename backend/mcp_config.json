@@ -6,13 +6,6 @@
       "args": [
         "yahoo_server.py"
       ]
-    },
-    "chart-renderer": {
-      "type": "stdio",
-      "command": ".venv/bin/python",
-      "args": [
-        "chart_server.py"
-      ]
     }
   }
 }

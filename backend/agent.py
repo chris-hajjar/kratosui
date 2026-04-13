@@ -28,16 +28,35 @@ BASE_SYSTEM_PROMPT = (
     "When a tool returns a simple flat list of strings (e.g. column names, field names), write them as a single line of comma-separated plain text — never as individual code blocks, code-formatted bullets, or multi-line lists. "
     "Reserve code formatting only for actual code snippets or query syntax. "
     "If a tool call fails, explain what went wrong in plain language.\n\n"
-    "## Chart Rendering Rules\n"
-    "You have access to a render_chart tool. Use it proactively when data is visual:\n"
-    "- After get_price_history → always call render_chart(widget_type='candlestick', title='<SYMBOL> Price History', data=<candles>, x_key='date')\n"
-    "- After get_technical_indicators when RSI is present → call render_chart(widget_type='gauge', title='<SYMBOL> RSI (<period>)', data=[{'name': 'RSI', 'value': <rsi_value>}], y_keys=['value'])\n"
-    "- Multi-series price comparisons (multiple symbols) → widget_type='line', pass all series with y_keys listing each symbol\n"
-    "- Volume or categorical bar data → widget_type='bar'\n"
-    "- ALWAYS call render_chart BEFORE writing your text analysis so the chart appears above the text\n"
-    "- Do NOT describe what the chart looks like — provide analysis and insights instead\n"
-    "- You may call render_chart multiple times in a single response (e.g. candlestick + gauge)\n"
-    "- Pass the raw data array from the tool result directly — do not summarize or truncate it\n"
+    "## Chart Rendering\n"
+    "When tool results contain visual data, you MUST emit a fenced chart block FIRST, before any text:\n"
+    "```chart\n"
+    '{\"type\": \"candlestick\", \"title\": \"AAPL Price History\", \"x_key\": \"date\", \"data\": [...]}\n'
+    "```\n"
+    "Types: candlestick (OHLC price history), line (time-series), area (filled line), bar (categorical), gauge (single 0–100 value e.g. RSI).\n"
+    "For gauge, data format is [{\"name\": \"RSI\", \"value\": <number>}]. "
+    "For multi-series line/area, include a y_keys array listing each series key. "
+    "Pass the raw data array from the tool result directly — do not summarize or truncate it. "
+    "Do NOT describe what the chart looks like — provide analysis and insights instead. "
+    "You may emit multiple chart blocks in one response (e.g. candlestick then gauge).\n\n"
+    "## Document Artifacts\n"
+    "You MUST emit a fenced artifact block whenever the user asks you to:\n"
+    "- write a report, summary, or analysis\n"
+    "- generate or export a CSV, spreadsheet, or data file\n"
+    "- create any document intended to be saved or downloaded\n"
+    "Emit the artifact block FIRST, then follow with a brief plain-text summary. "
+    "NEVER write the report content as regular markdown text — it must go inside the artifact block.\n"
+    "Format:\n"
+    "```artifact\n"
+    '{\"type\": \"markdown\", \"filename\": \"report.md\", \"content\": \"# Title\\n...\"}\n'
+    "```\n"
+    "or:\n"
+    "```artifact\n"
+    '{\"type\": \"csv\", \"filename\": \"data.csv\", \"content\": \"col1,col2\\nval1,val2\"}\n'
+    "```\n"
+    "Types: csv (comma-separated data), markdown (formatted report as .md). "
+    "Write the FULL content inline in the \"content\" field. Escape newlines as \\n, escape quotes as \\\". "
+    "After the artifact block, write 2-3 sentences of plain-text highlights only — do not repeat the full content.\n"
 )
 
 DEFAULT_INIT_TIMEOUT = 15.0
@@ -70,36 +89,6 @@ def _extract_error(exc: BaseException) -> str:
         return m.group(1)
     # Trim extremely long messages
     return msg[:300]
-
-
-def extract_widgets(all_messages: list) -> list[dict]:
-    """Walk all_messages and extract render_chart ToolCallPart args as widget SSE dicts."""
-    widgets = []
-    for msg in all_messages:
-        parts = getattr(msg, "parts", [])
-        for part in parts:
-            if not isinstance(part, ToolCallPart):
-                continue
-            if part.tool_name != "render_chart":
-                continue
-            try:
-                args = part.args_as_dict()
-            except Exception:
-                continue
-            widget_type = args.get("widget_type")
-            data = args.get("data")
-            if not widget_type or not data:
-                continue
-            widgets.append({
-                "type": "widget",
-                "widget_type": widget_type,
-                "title": args.get("title", ""),
-                "data": data,
-                "x_key": args.get("x_key", "date"),
-                "y_keys": args.get("y_keys") or [],
-                "config": args.get("config") or {},
-            })
-    return widgets
 
 
 def _load_server_objects() -> None:
@@ -285,8 +274,6 @@ async def stream_chat(
             _session_history[session_id] = all_msgs
 
         new_msgs = all_msgs[len(msg_history):]
-        for widget in extract_widgets(new_msgs):
-            yield widget
 
         # Emit skill_activated events for skills the model loaded via get_skill
         emitted: set[str] = set()

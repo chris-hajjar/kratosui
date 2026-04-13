@@ -3,6 +3,7 @@ import remarkGfm from 'remark-gfm'
 import type { Message } from '../../types'
 import { TracePanel } from './TracePanel'
 import { WidgetRenderer } from './WidgetRenderer'
+import { ArtifactRenderer } from './ArtifactRenderer'
 
 interface Props {
   message: Message
@@ -114,6 +115,11 @@ export function MessageBubble({ message }: Props) {
       {/* Widget charts */}
       {message.widgets && message.widgets.length > 0 && (
         <WidgetRenderer widgets={message.widgets} />
+      )}
+
+      {/* Artifact download cards */}
+      {message.artifacts && message.artifacts.length > 0 && (
+        <ArtifactRenderer artifacts={message.artifacts} />
       )}
 
       {/* Trace panel */}

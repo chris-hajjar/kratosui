@@ -42,17 +42,29 @@ export function CandlestickChart({ widget }: Props) {
     })
 
     const xKey = widget.x_key ?? 'time'
-    type Candle = Record<string, number>
+    type Candle = Record<string, unknown>
+
+    const isValidTime = (v: unknown): boolean => {
+      if (typeof v === 'number' && isFinite(v)) return true
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) return true
+      return false
+    }
+
     const candles = (widget.data as unknown as Candle[])
-      .filter(d => d.open != null && d.close != null)
-      .sort((a, b) => a[xKey] - b[xKey])
+      .filter(d => d.open != null && d.close != null && isValidTime(d[xKey]))
+      .sort((a, b) => {
+        const av = a[xKey] as number, bv = b[xKey] as number
+        return av - bv
+      })
+
+    if (candles.length === 0) return
 
     series.setData(candles.map(c => ({
       time: c[xKey] as unknown as import('lightweight-charts').Time,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
+      open: c.open as number,
+      high: c.high as number,
+      low: c.low as number,
+      close: c.close as number,
     })))
 
     chart.timeScale().fitContent()

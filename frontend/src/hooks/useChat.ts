@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import type { Message, TraceReceipt, SkillBadge, ChatSession, Widget } from '../types'
+import type { Message, TraceReceipt, SkillBadge, ChatSession, Widget, Artifact } from '../types'
 
 function uid() {
   return Math.random().toString(36).slice(2)
@@ -38,6 +38,9 @@ export function useChat() {
   const abortRef = useRef<AbortController | null>(null)
   const activeSessionIdRef = useRef<string | null>(null)
   const loadingSessionRef = useRef(false)
+  const rawBufferRef = useRef('')
+  const chartProcessedUpToRef = useRef(0)
+  const artifactProcessedUpToRef = useRef(0)
 
   // Auto-save sessions to localStorage.
   // Creates the session entry immediately on first user message (so it appears in the list right away),
@@ -106,6 +109,9 @@ export function useChat() {
     const history = messages.map(m => ({ role: m.role, content: m.content }))
 
     abortRef.current = new AbortController()
+    rawBufferRef.current = ''
+    chartProcessedUpToRef.current = 0
+    artifactProcessedUpToRef.current = 0
 
     try {
       const resp = await fetch('/api/chat', {
@@ -157,22 +163,52 @@ export function useChat() {
               break
             }
 
-            case 'widget': {
-              const widget: Widget = {
-                widget_type: evt.widget_type as Widget['widget_type'],
-                title: evt.title as string,
-                data: (evt.data as Record<string, unknown>[]) ?? [],
-                x_key: (evt.x_key as string) ?? 'date',
-                y_keys: (evt.y_keys as string[]) ?? [],
-                config: (evt.config as Record<string, unknown>) ?? {},
+            case 'text_delta': {
+              rawBufferRef.current += evt.content as string
+              const blockRe = /```chart\n([\s\S]*?)\n```/g
+              const newWidgets: Widget[] = []
+              let match
+              while ((match = blockRe.exec(rawBufferRef.current)) !== null) {
+                if (blockRe.lastIndex > chartProcessedUpToRef.current) {
+                  try {
+                    const parsed = JSON.parse(match[1])
+                    newWidgets.push({
+                      widget_type: parsed.type,
+                      title: parsed.title ?? '',
+                      data: parsed.data ?? [],
+                      x_key: parsed.x_key ?? 'date',
+                      y_keys: parsed.y_keys ?? [],
+                      config: parsed.config ?? {},
+                    })
+                  } catch { /* ignore malformed blocks */ }
+                  chartProcessedUpToRef.current = blockRe.lastIndex
+                }
               }
-              patch(m => ({ ...m, widgets: [...(m.widgets ?? []), widget] }))
+              const artifactRe = /```artifact\n([\s\S]*?)\n```/g
+              const newArtifacts: Artifact[] = []
+              while ((match = artifactRe.exec(rawBufferRef.current)) !== null) {
+                if (artifactRe.lastIndex > artifactProcessedUpToRef.current) {
+                  try {
+                    const parsed = JSON.parse(match[1])
+                    if (parsed.type && parsed.filename && parsed.content) {
+                      newArtifacts.push({ type: parsed.type, filename: parsed.filename, content: parsed.content })
+                    }
+                  } catch { /* ignore malformed */ }
+                  artifactProcessedUpToRef.current = artifactRe.lastIndex
+                }
+              }
+              const cleanedContent = rawBufferRef.current
+                .replace(/```chart\n[\s\S]*?\n```/g, '')
+                .replace(/```artifact\n[\s\S]*?\n```/g, '')
+                .trim()
+              patch(m => ({
+                ...m,
+                content: cleanedContent,
+                ...(newWidgets.length > 0 ? { widgets: [...(m.widgets ?? []), ...newWidgets] } : {}),
+                ...(newArtifacts.length > 0 ? { artifacts: [...(m.artifacts ?? []), ...newArtifacts] } : {}),
+              }))
               break
             }
-
-            case 'text_delta':
-              patch(m => ({ ...m, content: m.content + (evt.content as string) }))
-              break
 
             case 'trace':
               patch(m => ({
@@ -228,6 +264,9 @@ export function useChat() {
     setIsLoading(false)
     activeSessionIdRef.current = null
     setActiveSessionId(null)
+    rawBufferRef.current = ''
+    chartProcessedUpToRef.current = 0
+    artifactProcessedUpToRef.current = 0
   }, [])
 
   const loadSession = useCallback((session: ChatSession) => {
@@ -238,6 +277,9 @@ export function useChat() {
     setIsLoading(false)
     activeSessionIdRef.current = session.id
     setActiveSessionId(session.id)
+    rawBufferRef.current = ''
+    chartProcessedUpToRef.current = 0
+    artifactProcessedUpToRef.current = 0
   }, [])
 
   const deleteSession = useCallback((id: string) => {

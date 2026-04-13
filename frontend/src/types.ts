@@ -27,6 +27,12 @@ export interface Widget {
   config: Record<string, unknown>
 }
 
+export interface Artifact {
+  type: 'csv' | 'markdown'
+  filename: string
+  content: string
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -34,6 +40,7 @@ export interface Message {
   skills?: SkillBadge[]
   trace?: TraceReceipt
   widgets?: Widget[]
+  artifacts?: Artifact[]
   isStreaming?: boolean
   error?: string
 }

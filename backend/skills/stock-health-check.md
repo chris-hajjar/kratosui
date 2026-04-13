@@ -10,6 +10,12 @@ When asked to check or run a rundown on a stock, call these three tools in order
 2. get_technical_indicators — fetch RSI, MACD, SMA, and Bollinger Bands
 3. get_stock_news — fetch the latest 3 headlines
 
+After get_technical_indicators, immediately emit a gauge chart for RSI before any text:
+
+```chart
+{"type": "gauge", "title": "<SYMBOL> RSI", "data": [{"name": "RSI", "value": <rsi_value>}], "y_keys": ["value"]}
+```
+
 Then present a consolidated summary:
 - **Price snapshot**: current price, day range, volume
 - **Technical signal**: one-line verdict (bullish / neutral / bearish) based on RSI position and MACD direction
