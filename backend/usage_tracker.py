@@ -1,9 +1,12 @@
 """Lightweight SQLite usage tracker for LLM token/cost logging."""
 from __future__ import annotations
 
+import csv
+import io
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "usage_history.db"
@@ -34,6 +37,18 @@ def _conn():
         conn.commit()
     finally:
         conn.close()
+
+
+def _percentile(values: list[float], p: float) -> float:
+    """Return the p-th percentile of a sorted list (0 ≤ p ≤ 100)."""
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    idx = (p / 100) * (len(sorted_vals) - 1)
+    lo = int(idx)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = idx - lo
+    return sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac
 
 
 def init_db() -> None:
@@ -111,24 +126,51 @@ def get_stats(model_filter: str | None = None) -> dict:
     p: tuple = (model_filter,) if model_filter else ()
 
     with _conn() as conn:
-        totals = conn.execute(
+        totals_row = conn.execute(
             f"""SELECT
                   COUNT(*)                          AS requests,
                   COALESCE(SUM(input_tokens),  0)   AS input_tokens,
                   COALESCE(SUM(output_tokens), 0)   AS output_tokens,
                   COALESCE(SUM(total_tokens),  0)   AS total_tokens,
                   COALESCE(SUM(cost_usd),      0.0) AS total_cost,
-                  COALESCE(AVG(cost_usd),      0.0) AS avg_cost
+                  COALESCE(AVG(cost_usd),      0.0) AS avg_cost,
+                  AVG(duration_ms)                   AS avg_latency_ms,
+                  AVG(input_tokens)                  AS avg_input_tokens,
+                  AVG(output_tokens)                 AS avg_output_tokens,
+                  MIN(timestamp)                     AS first_ts,
+                  MAX(timestamp)                     AS last_ts
                FROM usage_logs {where}""",
             p,
         ).fetchone()
 
+        totals = dict(totals_row)
+
+        # p95 latency — fetch all durations and compute in Python
+        durations = [
+            row[0] for row in conn.execute(
+                f"SELECT duration_ms FROM usage_logs {where} WHERE duration_ms IS NOT NULL",
+                p,
+            ).fetchall()
+        ]
+        totals["p95_latency_ms"] = _percentile(durations, 95) if durations else None
+        if totals["avg_latency_ms"] is None and not durations:
+            totals["avg_latency_ms"] = None
+
+        # projected monthly cost
+        first_ts = totals.pop("first_ts")
+        last_ts  = totals.pop("last_ts")
+        if first_ts and last_ts and totals["requests"] > 0:
+            days_elapsed = max((last_ts - first_ts) / 86400, 1)
+            totals["projected_monthly"] = (totals["total_cost"] / days_elapsed) * 30
+        else:
+            totals["projected_monthly"] = None
+
         daily = conn.execute(
             f"""SELECT
-                  DATE(timestamp, 'unixepoch') AS day,
-                  COUNT(*)                      AS requests,
-                  SUM(total_tokens)             AS total_tokens,
-                  SUM(cost_usd)                 AS cost
+                  DATE(timestamp, 'unixepoch', 'localtime') AS day,
+                  COUNT(*)                                    AS requests,
+                  SUM(total_tokens)                           AS total_tokens,
+                  SUM(cost_usd)                               AS cost
                FROM usage_logs {where}
                GROUP BY day
                ORDER BY day ASC
@@ -137,38 +179,85 @@ def get_stats(model_filter: str | None = None) -> dict:
         ).fetchall()
 
         # Always show all models for the filter dropdown — never filtered
-        models = conn.execute(
+        models_rows = conn.execute(
             """SELECT
                   model,
                   COUNT(*)          AS requests,
                   SUM(total_tokens) AS total_tokens,
-                  SUM(cost_usd)     AS cost
+                  SUM(cost_usd)     AS cost,
+                  AVG(duration_ms)  AS avg_latency_ms
                FROM usage_logs
                GROUP BY model
                ORDER BY cost DESC""",
         ).fetchall()
 
+        models = []
+        for row in models_rows:
+            m = dict(row)
+            # fetch per-model durations for p50/p95
+            model_durations = [
+                r[0] for r in conn.execute(
+                    "SELECT duration_ms FROM usage_logs WHERE model = ? AND duration_ms IS NOT NULL",
+                    (m["model"],),
+                ).fetchall()
+            ]
+            if model_durations:
+                m["latency"] = {
+                    "avg": m["avg_latency_ms"],
+                    "p50": _percentile(model_durations, 50),
+                    "p95": _percentile(model_durations, 95),
+                }
+            else:
+                m["latency"] = None
+            models.append(m)
+
         return {
-            "totals": dict(totals),
+            "totals": totals,
             "daily":  [dict(r) for r in daily],
-            "models": [dict(r) for r in models],
+            "models": models,
         }
 
 
-def get_tool_stats() -> list[dict]:
-    """Return per-tool call counts, unique request counts, and last-used time."""
+def get_skill_stats() -> list[dict]:
+    """Return per-skill cost/usage breakdown."""
     with _conn() as conn:
         rows = conn.execute(
             """SELECT
-                  tool_name,
-                  COUNT(*)                   AS calls,
-                  COUNT(DISTINCT request_id) AS unique_requests,
-                  MAX(timestamp)             AS last_used,
-                  GROUP_CONCAT(DISTINCT skill_name) AS skills
-               FROM tool_logs
-               GROUP BY tool_name
+                  skill_name,
+                  COUNT(*)          AS requests,
+                  SUM(total_tokens) AS total_tokens,
+                  SUM(cost_usd)     AS cost,
+                  AVG(cost_usd)     AS avg_cost,
+                  AVG(duration_ms)  AS avg_latency_ms
+               FROM usage_logs
+               WHERE skill_name IS NOT NULL
+               GROUP BY skill_name
+               ORDER BY cost DESC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_tool_stats(model_filter: str | None = None) -> list[dict]:
+    """Return per-tool call counts, unique request counts, and last-used time."""
+    where = "WHERE tl.model = ?" if model_filter else ""
+    p: tuple = (model_filter,) if model_filter else ()
+
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                  tl.tool_name,
+                  COUNT(*)                                                          AS calls,
+                  COUNT(DISTINCT tl.request_id)                                    AS unique_requests,
+                  MAX(tl.timestamp)                                                 AS last_used,
+                  GROUP_CONCAT(DISTINCT tl.skill_name)                             AS skills,
+                  SUM(CASE WHEN tl.timestamp > strftime('%s', 'now', '-7 days')
+                           THEN 1 ELSE 0 END)                                      AS calls_7d
+               FROM tool_logs tl
+               {where}
+               GROUP BY tl.tool_name
                ORDER BY calls DESC
-               LIMIT 30"""
+               LIMIT 30""",
+            p,
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -187,3 +276,33 @@ def get_logs(model_filter: str | None = None, limit: int = 50) -> list[dict]:
             p,
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def export_csv() -> str:
+    """Return all usage_logs rows as a CSV string."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT id, timestamp, model, input_tokens, output_tokens,
+                      total_tokens, cost_usd, skill_name, duration_ms
+               FROM usage_logs
+               ORDER BY timestamp ASC"""
+        ).fetchall()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["id", "datetime", "model", "input_tokens", "output_tokens",
+                     "total_tokens", "cost_usd", "skill_name", "duration_ms"])
+    for row in rows:
+        r = dict(row)
+        writer.writerow([
+            r["id"],
+            datetime.fromtimestamp(r["timestamp"]).isoformat(),
+            r["model"],
+            r["input_tokens"],
+            r["output_tokens"],
+            r["total_tokens"],
+            r["cost_usd"],
+            r["skill_name"] or "",
+            r["duration_ms"] if r["duration_ms"] is not None else "",
+        ])
+    return buf.getvalue()

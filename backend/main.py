@@ -10,7 +10,7 @@ import frontmatter
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -21,7 +21,7 @@ from agent import (
     get_pending_oauth, clear_pending_oauth,
 )
 from skills_loader import delete_skill, load_skills, save_skill
-from usage_tracker import get_logs, get_stats, get_tool_stats, init_db
+from usage_tracker import export_csv, get_logs, get_skill_stats, get_stats, get_tool_stats, init_db
 
 BASE_DIR = Path(__file__).parent
 MCP_CONFIG_PATH = BASE_DIR / "mcp_config.json"
@@ -363,8 +363,23 @@ def usage_logs(model: str | None = None, limit: int = 50):
 
 
 @app.get("/api/usage/tools")
-def usage_tools():
-    return get_tool_stats()
+def usage_tools(model: str | None = None):
+    return get_tool_stats(model_filter=model)
+
+
+@app.get("/api/usage/skills")
+def usage_skills():
+    return get_skill_stats()
+
+
+@app.get("/api/usage/export")
+def export_usage():
+    csv_data = export_csv()
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=usage_export.csv"},
+    )
 
 
 # ---------------------------------------------------------------------------
