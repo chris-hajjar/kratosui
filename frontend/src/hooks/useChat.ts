@@ -81,7 +81,7 @@ export function useChat() {
     })
   }, [messages])
 
-  const sendMessage = useCallback(async (text: string, model: string = "openai:gpt-4o") => {
+  const sendMessage = useCallback(async (text: string, model: string = "openai:gpt-4o-mini") => {
     if (!text.trim() || isLoading) return
 
     // Ensure we have a session ID before sending

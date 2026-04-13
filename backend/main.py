@@ -62,7 +62,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
-    model: str = "openai:gpt-4o"
+    model: str = "openai:gpt-4o-mini"
     session_id: str = ""
 
 

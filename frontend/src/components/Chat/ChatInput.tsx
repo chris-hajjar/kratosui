@@ -2,9 +2,9 @@ import { useState, useRef, useEffect } from 'react'
 import type { KeyboardEvent } from 'react'
 
 const MODELS = [
+  { id: 'openai:gpt-4o-mini', label: 'GPT-4o mini' },
   { id: 'openai:gpt-4o',      label: 'GPT-4o' },
   { id: 'openai:gpt-4-turbo', label: 'GPT-4 Turbo' },
-  { id: 'openai:gpt-4o-mini', label: 'GPT-4o mini' },
 ]
 
 interface Props {
